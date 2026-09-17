@@ -1376,9 +1376,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="bind address (default: 0.0.0.0). Non-loopback binds mint an admin key when none is "
-        "set so /sessions* is never left open on a reachable interface.",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1). Non-loopback binds require --admin-key or "
+        "$OPENENV_CAPTURE_ADMIN_KEY so /sessions* is never left open on a reachable interface.",
     )
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument(
@@ -1415,8 +1415,7 @@ def main() -> None:
         "--admin-key",
         default=os.environ.get("OPENENV_CAPTURE_ADMIN_KEY", ""),
         help="key the session-management routes (/sessions*) require (defaults to "
-        "$OPENENV_CAPTURE_ADMIN_KEY). Required for non-loopback binds: if unset there, a random "
-        "key is minted and printed. Loopback-only binds may leave it unset.",
+        "$OPENENV_CAPTURE_ADMIN_KEY). Required for non-loopback binds. Never printed or logged.",
     )
     args = parser.parse_args()
 
@@ -1443,15 +1442,14 @@ def main() -> None:
         for fix in report.param_fixes:
             print(f"  upstream compat: {fix}")
 
-    # Flag/env win; otherwise mint when the bind is reachable from outside. Leaving the key unset
-    # with --host 0.0.0.0 (the CLI default) would publish /sessions* ungated — the same open
-    # control plane `run_batch` already refuses. Loopback stays fail-open for private local use.
+    # Flag/env only — never mint-and-print (that would log a credential). Loopback may leave the
+    # key unset for private local use; non-loopback must supply one explicitly.
     admin_key = args.admin_key or None
     if not admin_key and not _is_loopback_host(args.host):
-        admin_key = secrets.token_urlsafe(32)
-        print(
-            f"capture admin key (minted for --host={args.host}; "
-            f"set --admin-key or $OPENENV_CAPTURE_ADMIN_KEY to pin): {admin_key}"
+        raise SystemExit(
+            f"--admin-key or $OPENENV_CAPTURE_ADMIN_KEY is required when --host={args.host} "
+            "(non-loopback bind would publish /sessions* ungated). "
+            "Pass --host 127.0.0.1 for a private local port, or set a key."
         )
 
     uvicorn.run(
