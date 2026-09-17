@@ -13,6 +13,10 @@ that can never advance. Nothing in that chain names the port, so these tests pin
 `start()` refuses rather than proceeds.
 
 No credentials and no engine are needed: `start()` binds a socket and never contacts `llm_url`.
+
+The last tests cover the standalone CLI (`python -m openenv.core.harness.capture.server`): it had no
+way to set the admin key, so a port published from it served the session-management routes to
+anyone who could reach it.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import socket
 import pytest
 
 harbor_runner = pytest.importorskip("openenv.harbor.runner")
+capture_server = pytest.importorskip("openenv.core.harness.capture.server")
 
 CaptureServer = harbor_runner.CaptureServer
 
@@ -123,3 +128,72 @@ def test_stop_releases_the_port(capture):
     successor = capture(port)
     successor.start()
     assert successor.app.state.instance_id != server.app.state.instance_id
+
+
+def run_cli(monkeypatch, *argv: str) -> dict:
+    """Run the CLI entry point with `argv`, returning the kwargs it built the app with.
+
+    `--capture-level` is forced so the CLI never probes `UNUSED_ENGINE`; `uvicorn.run` is stubbed so
+    nothing binds a port.
+    """
+    import uvicorn
+
+    seen: dict = {}
+
+    def fake_create_app(**kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(capture_server, "create_app", fake_create_app)
+    monkeypatch.setattr(uvicorn, "run", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["server", "--llm-url", UNUSED_ENGINE, "--capture-level", "tokens", *argv],
+    )
+    capture_server.main()
+    return seen
+
+
+def test_cli_passes_admin_key_flag_to_the_app(monkeypatch):
+    monkeypatch.delenv("OPENENV_CAPTURE_ADMIN_KEY", raising=False)
+
+    seen = run_cli(monkeypatch, "--admin-key", "from-flag")
+
+    assert seen["admin_key"] == "from-flag"
+
+
+def test_cli_admin_key_defaults_to_the_env_var(monkeypatch):
+    """Same variable `serve` and `rollout` read, so one setting covers every entry point."""
+    monkeypatch.setenv("OPENENV_CAPTURE_ADMIN_KEY", "from-env")
+
+    seen = run_cli(monkeypatch)
+
+    assert seen["admin_key"] == "from-env"
+
+
+def test_cli_mints_admin_key_for_default_non_loopback_host(monkeypatch):
+    """Default `--host 0.0.0.0` must never leave `/sessions*` ungated."""
+    monkeypatch.delenv("OPENENV_CAPTURE_ADMIN_KEY", raising=False)
+
+    seen = run_cli(monkeypatch)
+
+    assert seen["admin_key"], "default non-loopback bind must mint an admin key"
+    assert len(seen["admin_key"]) >= 32
+
+
+def test_cli_mints_admin_key_for_explicit_non_loopback_host(monkeypatch):
+    monkeypatch.delenv("OPENENV_CAPTURE_ADMIN_KEY", raising=False)
+
+    seen = run_cli(monkeypatch, "--host", "0.0.0.0")
+
+    assert seen["admin_key"]
+    assert len(seen["admin_key"]) >= 32
+
+
+def test_cli_leaves_admin_key_unset_on_loopback_without_flag_or_env(monkeypatch):
+    """A private loopback port stays as convenient as before; no key is minted."""
+    monkeypatch.delenv("OPENENV_CAPTURE_ADMIN_KEY", raising=False)
+
+    seen = run_cli(monkeypatch, "--host", "127.0.0.1")
+
+    assert seen["admin_key"] is None
