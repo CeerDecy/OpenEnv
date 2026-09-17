@@ -238,6 +238,32 @@ class TestCreateKwargs:
         with pytest.raises(ValueError, match="Unsupported NovitaSandboxProvider"):
             provider.start_container("img:latest", bogus=1)
 
+    def test_wait_timeout_accepted_and_ignored(self, provider, adapter):
+        """AutoEnv.from_env() always forwards wait_timeout; rejecting it would
+        make the whole AutoEnv path unusable. No provider ever sees its value
+        (`_bootstrap_container` calls wait_for_ready without a timeout), so it
+        is dropped rather than rejected."""
+        url = provider.start_container(
+            "img:latest", wait_timeout=30.0, env_vars={"A": "1"}
+        )
+        assert url.startswith("https://")
+        # The received kwargs are exactly the ones create_sandbox understands.
+        assert set(adapter.created[0]) == {
+            "image",
+            "template",
+            "env_vars",
+            "timeout",
+            "metadata",
+            "secure",
+            "allow_internet_access",
+            "sandbox",
+        }
+
+    def test_typo_still_rejected_alongside_wait_timeout(self, provider):
+        """Dropping wait_timeout must not weaken the typo guard."""
+        with pytest.raises(ValueError, match="Unsupported NovitaSandboxProvider"):
+            provider.start_container("img:latest", wait_timeout=30.0, env_varz={})
+
 
 # ---------------------------------------------------------------------------
 # Tests: server command resolution
@@ -524,6 +550,22 @@ class TestImageFromDockerfile:
         assert adapter.created[0]["template"] == adapter.template_id
         assert adapter.created[0]["image"] is None
 
+    def test_registration_after_construction_also_works(self, tmp_path, adapter):
+        """Constructor order must not matter.
+
+        The registry is class-level, so a provider built BEFORE
+        `image_from_dockerfile()` still sees the entry. An instance-level copy
+        taken in `__init__` (the previous behavior) made this order fail with a
+        misleading "call image_from_dockerfile() first" error.
+        """
+        provider = NovitaSandboxProvider(_adapter=adapter)
+        df = self._write_dockerfile(tmp_path, "FROM python:3.11\n")
+        image = NovitaSandboxProvider.image_from_dockerfile(str(df))
+        provider.start_container(image)
+
+        assert len(adapter.template_builds) == 1
+        assert adapter.created[0]["template"] == adapter.template_id
+
     def test_start_container_accepts_template_ref_from_kwarg(self, tmp_path, adapter):
         df = self._write_dockerfile(tmp_path, "FROM python:3.11\n")
         image = NovitaSandboxProvider.image_from_dockerfile(str(df))
@@ -678,38 +720,21 @@ class TestBuildLogsDefault:
         dockerfile.write_text("FROM python:3.11\nRUN echo hi\n")
         return dockerfile
 
-    def test_default_is_printing_callback(self):
-        """A first build is slow; silence would look like a hang."""
+    def test_default_is_none(self):
+        """Build logs are off by default so nothing unredacted is printed.
+
+        The entries are not passed through `_redact` (RFC 002 S4), so surfacing
+        them is the caller's explicit choice rather than the default.
+        """
         import inspect
 
         sig = inspect.signature(NovitaSandboxProvider.__init__)
-        default = sig.parameters["on_build_logs"].default
-        assert callable(default)
-        # A named function, not a lambda, so the docs render it readably.
-        assert default.__name__ == "_print_build_log"
+        assert sig.parameters["on_build_logs"].default is None
 
-    def test_default_callback_prints(self, tmp_path, adapter, capsys):
+    def test_default_prints_nothing(self, tmp_path, adapter, capsys):
         df = self._write_dockerfile(tmp_path)
         image = NovitaSandboxProvider.image_from_dockerfile(str(df))
         provider = NovitaSandboxProvider(image=image, _adapter=adapter)
-
-        # Emulate the SDK invoking the callback during the build.
-        original = adapter.build_template
-
-        def build_template(**kwargs):
-            kwargs["on_build_logs"](">>> building layer 1")
-            return original(**kwargs)
-
-        adapter.build_template = build_template
-        provider.start_container()
-        assert ">>> building layer 1" in capsys.readouterr().out
-
-    def test_none_silences(self, tmp_path, adapter, capsys):
-        df = self._write_dockerfile(tmp_path)
-        image = NovitaSandboxProvider.image_from_dockerfile(str(df))
-        provider = NovitaSandboxProvider(
-            image=image, on_build_logs=None, _adapter=adapter
-        )
         provider.start_container()
         assert capsys.readouterr().out == ""
 

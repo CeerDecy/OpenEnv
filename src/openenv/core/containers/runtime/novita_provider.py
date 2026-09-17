@@ -234,16 +234,6 @@ def _prepare_dockerfile(content: str) -> str:
     return _flatten_multistage(_resolve_from_references(_strip_mount_flags(content)))
 
 
-def _print_build_log(entry: Any) -> None:
-    """Default ``on_build_logs``: print each template build-log entry.
-
-    A first build resolves and builds the image server-side and can take
-    minutes, so silence looks like a hang. Named (rather than a lambda default)
-    so the parameter's default renders readably in the generated API docs.
-    """
-    print(entry)
-
-
 def _require_secure_url(url: str) -> str:
     """Enforce https/wss transport (RFC 002 security invariant S1).
 
@@ -642,7 +632,7 @@ class NovitaSandboxProvider(ContainerProvider):
         cpu_count: int = _DEFAULT_TEMPLATE_CPU,
         memory_mb: int = _DEFAULT_TEMPLATE_MEMORY_MB,
         template_name: Optional[str] = None,
-        on_build_logs: Optional[Callable[[Any], None]] = _print_build_log,
+        on_build_logs: Optional[Callable[[Any], None]] = None,
         _adapter: Any = None,
     ):
         """
@@ -704,11 +694,11 @@ class NovitaSandboxProvider(ContainerProvider):
                 Defaults to a name derived from the Dockerfile's directory plus a
                 content hash, so re-running with the same Dockerfile reuses the
                 build cache.
-            on_build_logs (`Callable`, *optional*, defaults to printing each entry):
+            on_build_logs (`Callable`, *optional*):
                 Callback receiving build-log entries while a Dockerfile template
-                is built. Defaults to printing the entries, so a first build
-                (which can take minutes) is not silent. Pass `None` to suppress
-                output, or your own callable to route it elsewhere.
+                is built. Off by default: build logs are not redacted, so they
+                are withheld rather than printed (RFC 002 S4). Pass a callable to
+                surface them.
             _adapter (`Any`, *optional*):
                 Injection seam for tests; a duck-typed fake replaces the SDK.
         """
@@ -728,8 +718,6 @@ class NovitaSandboxProvider(ContainerProvider):
 
         self._sandbox: Any = None
         self._base_url: Optional[str] = None
-        # Registry paths from `image_from_dockerfile`, keyed by "dockerfile:<path>".
-        self._dockerfile_registry = dict(type(self)._dockerfile_registry)
         # Injected env-var values, used to scrub captured server output before
         # it is ever surfaced in an error.
         self._redact_values: set[str] = set()
@@ -862,6 +850,14 @@ class NovitaSandboxProvider(ContainerProvider):
         effective_env_vars = self._env_vars if env_vars is None else env_vars
 
         cmd = kwargs.pop("cmd", None) or self._cmd
+        # `AutoEnv.from_env()` forwards this unconditionally (default 30.0) via
+        # `from_docker_image` -> `_bootstrap_container`, so rejecting it would
+        # make the entire AutoEnv path unusable for this provider. It is
+        # meaningless here: `_bootstrap_container` calls `wait_for_ready(base_url)`
+        # without a timeout, so no provider ever sees the value. Accept and drop
+        # it rather than fail; unknown options still raise, so a typo cannot
+        # silently change sandbox behavior.
+        kwargs.pop("wait_timeout", None)
         if kwargs:
             unknown = ", ".join(sorted(kwargs))
             raise ValueError(
