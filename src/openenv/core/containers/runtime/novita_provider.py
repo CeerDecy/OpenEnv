@@ -307,13 +307,11 @@ class _DefaultNovitaAdapter:
         timeout: int,
         metadata: Optional[Dict[str, str]],
         secure: Optional[bool],
-        allow_internet_access: bool,
     ) -> Any:
         # Exactly one source: a registry image (resolved and cached by the SDK
         # itself) or an already-built template id from `image_from_dockerfile`.
         kwargs: Dict[str, Any] = {
             "timeout": timeout,
-            "allow_internet_access": allow_internet_access,
         }
 
         if template is not None:
@@ -625,7 +623,6 @@ class NovitaSandboxProvider(ContainerProvider):
         timeout: int = _DEFAULT_SANDBOX_TIMEOUT_S,
         metadata: Optional[Dict[str, str]] = None,
         secure: Optional[bool] = None,
-        allow_internet_access: bool = True,
         cmd: Optional[str] = None,
         working_directory: Optional[str] = None,
         surface_server_logs: bool = False,
@@ -668,10 +665,6 @@ class NovitaSandboxProvider(ContainerProvider):
                 Whether envd requires its access token. `None` uses the SDK
                 default (secured on modern domains). This governs the sandbox
                 control plane, not the exposed server port.
-            allow_internet_access (`bool`, *optional*, defaults to `True`):
-                When `False`, blocks all outbound traffic from the sandbox —
-                equivalent to a deny-all egress policy. Prefer `False` for
-                untrusted environments that do not need network access.
             cmd (`str`, *optional*):
                 Shell command to start the server inside the sandbox. When
                 omitted, the command is auto-discovered from `openenv.yaml`.
@@ -707,7 +700,6 @@ class NovitaSandboxProvider(ContainerProvider):
         self._timeout = timeout
         self._metadata = metadata
         self._secure = secure
-        self._allow_internet_access = allow_internet_access
         self._cmd = cmd
         self._working_directory = working_directory
         self.surface_server_logs = surface_server_logs
@@ -893,7 +885,6 @@ class NovitaSandboxProvider(ContainerProvider):
                 timeout=self._timeout,
                 metadata=self._metadata,
                 secure=self._secure,
-                allow_internet_access=self._allow_internet_access,
             )
         except Exception:
             self._redact_values = set()

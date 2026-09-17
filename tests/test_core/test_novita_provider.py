@@ -52,7 +52,6 @@ class _FakeAdapter:
         timeout,
         metadata,
         secure,
-        allow_internet_access,
     ):
         if self.fail_create:
             raise RuntimeError("create failed")
@@ -65,7 +64,6 @@ class _FakeAdapter:
                 "timeout": timeout,
                 "metadata": metadata,
                 "secure": secure,
-                "allow_internet_access": allow_internet_access,
                 "sandbox": sandbox,
             }
         )
@@ -214,13 +212,11 @@ class TestCreateKwargs:
             _adapter=adapter,
             timeout=120,
             metadata={"idle_timeout": "900"},
-            allow_internet_access=False,
         )
         provider.start_container("img:latest")
         created = adapter.created[0]
         assert created["timeout"] == 120
         assert created["metadata"] == {"idle_timeout": "900"}
-        assert created["allow_internet_access"] is False
 
     def test_default_timeout_is_one_hour(self, provider, adapter):
         provider.start_container("img:latest")
@@ -255,7 +251,6 @@ class TestCreateKwargs:
             "timeout",
             "metadata",
             "secure",
-            "allow_internet_access",
             "sandbox",
         }
 
@@ -956,18 +951,19 @@ class TestDefaultAdapter:
                 timeout=3600,
                 metadata={"idle_timeout": "900"},
                 secure=None,
-                allow_internet_access=True,
             )
             kwargs = calls["create_kwargs"]
             assert kwargs["image"] == "img:latest"
             assert kwargs["envs"] == {"A": "1"}
             assert kwargs["timeout"] == 3600
             assert kwargs["metadata"] == {"idle_timeout": "900"}
-            assert kwargs["allow_internet_access"] is True
             # secure=None must be omitted, not forwarded as a null.
             assert "secure" not in kwargs
             # A registry image and a template are mutually exclusive sources.
             assert "template" not in kwargs
+            # Network posture is left to the SDK default, matching DaytonaProvider
+            # -- OpenEnv does not set an egress policy for either provider.
+            assert "allow_internet_access" not in kwargs
         finally:
             sys.modules.pop("novita_sandbox", None)
 
@@ -983,7 +979,6 @@ class TestDefaultAdapter:
                 timeout=3600,
                 metadata=None,
                 secure=None,
-                allow_internet_access=True,
             )
             kwargs = calls["create_kwargs"]
             assert kwargs["template"] == "tpl-built-1"
@@ -1010,7 +1005,6 @@ class TestDefaultAdapter:
                 timeout=3600,
                 metadata=None,
                 secure=None,
-                allow_internet_access=True,
             )
             build = calls["create_kwargs"]["build"]
             assert build["cmd"] == "sleep infinity"

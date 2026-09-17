@@ -41,7 +41,11 @@ async def main() -> int:
             print("Command output:")
             print(result.observation.output)
 
-            result = await env.step(Tbench2Action(action_type="exec", command="curl -v http://127.0.0.1:8000"))
+            result = await env.step(
+                Tbench2Action(
+                    action_type="exec", command="curl -v http://127.0.0.1:8000"
+                )
+            )
             print("Command output:")
             print(result.observation.output)
     finally:
