@@ -370,10 +370,15 @@ class _DefaultNovitaAdapter:
             # copy. Setting `start_cmd` here wins over the inherited value (the
             # caller always overrides the image) while the image's ENV still
             # comes through, which is what the PATH needs.
+            ready_cmd = wait_for_timeout(_KEEPALIVE_READY_MS)
             kwargs["image"] = image
             kwargs["build"] = {
                 "cmd": _KEEPALIVE_CMD,
-                "ready_cmd": wait_for_timeout(_KEEPALIVE_READY_MS),
+                # Sandbox.create fingerprints this mapping with json.dumps
+                # before converting it into a TemplateBuilder. Keep the
+                # serialized command here; Template.set_start_cmd accepts the
+                # string as well as the ReadyCmd helper.
+                "ready_cmd": ready_cmd.get_cmd(),
             }
 
         if env_vars:
@@ -461,7 +466,11 @@ class _DefaultNovitaAdapter:
         if on_build_logs is not None:
             build_kwargs["on_build_logs"] = on_build_logs
 
-        info = Template.build(builder, name, **build_kwargs)
+        # Build through the configured namespace so the SDK merges the
+        # api_key/domain passed to Novita(...) into Template.build's connection
+        # config. Calling Template.build directly would fall back to an empty
+        # ConnectionConfig when those values are not present in the environment.
+        info = self._novita.template.build(builder, name, **build_kwargs)
         return str(info.template_id)
 
 

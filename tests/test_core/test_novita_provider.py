@@ -908,7 +908,7 @@ def _install_fake_novita():
 
         Mirrors the real shape: `Template(...)` is constructed with the build
         context, `.from_dockerfile(...)` returns a builder, and
-        `Template.build(builder, name, **kwargs)` returns the build info.
+        `novita.template.build(builder, name, **kwargs)` returns the build info.
         """
 
         def __init__(self, file_context_path=None, file_ignore_patterns=None):
@@ -926,11 +926,20 @@ def _install_fake_novita():
             calls["build_kwargs"] = kwargs
             return types.SimpleNamespace(template_id="tpl-built-1")
 
+    class _TemplateNS:
+        def build(self, builder, name, **kwargs):
+            calls["template_namespace_build"] = {
+                "api_key": calls["api_key"],
+                "domain": calls["domain"],
+            }
+            return _FakeTemplateClass.build(builder, name, **kwargs)
+
     class _FakeNovita:
         def __init__(self, api_key=None, domain=None, **kwargs):
             calls["api_key"] = api_key
             calls["domain"] = domain
             self.sandbox = _SandboxNS()
+            self.template = _TemplateNS()
 
     class _ReadyCmd:
         def __init__(self, cmd):
@@ -1047,8 +1056,12 @@ class TestDefaultAdapter:
             )
             build = calls["create_kwargs"]["build"]
             assert build["cmd"] == "sleep infinity"
-            # A ready check is mandatory alongside set_start_cmd.
-            assert build["ready_cmd"].get_cmd()
+            # Sandbox.create fingerprints this mapping with json.dumps before
+            # converting it into a template builder.
+            import json
+
+            json.dumps(build)
+            assert build["ready_cmd"] == "sleep 5000"
         finally:
             sys.modules.pop("novita_sandbox", None)
 
@@ -1056,7 +1069,9 @@ class TestDefaultAdapter:
         """build_template drives Template.from_dockerfile -> build -> id."""
         _, calls = _install_fake_novita()
         try:
-            adapter = _DefaultNovitaAdapter(api_key="k", domain=None)
+            adapter = _DefaultNovitaAdapter(
+                api_key="k-123", domain="us-phx-1.sandbox.novita.ai"
+            )
             template_id = adapter.build_template(
                 dockerfile_content="FROM python:3.12\nRUN echo hi\n",
                 context_dir="/ctx",
@@ -1072,6 +1087,10 @@ class TestDefaultAdapter:
             assert calls["build_kwargs"]["cpu_count"] == 4
             assert calls["build_kwargs"]["memory_mb"] == 2048
             assert "on_build_logs" not in calls["build_kwargs"]
+            assert calls["template_namespace_build"] == {
+                "api_key": "k-123",
+                "domain": "us-phx-1.sandbox.novita.ai",
+            }
             # The template's own start command is the keepalive, not the
             # Dockerfile's CMD -- otherwise port 8000 is taken before launch.
             builder = calls["build_builder"]
