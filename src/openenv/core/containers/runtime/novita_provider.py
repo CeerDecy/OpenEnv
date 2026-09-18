@@ -56,6 +56,7 @@ _COPY_FROM_RE = re.compile(
     r"^\s*COPY\s+--from=(?P<stage>\S+)\s+(?P<src>\S+)\s+(?P<dst>\S+)\s*$",
     re.IGNORECASE,
 )
+_COPY_FROM_REMAINDER_RE = re.compile(r"^\s*COPY\b.*\s--from(?:=|\s|$)", re.IGNORECASE)
 _USER_RE = re.compile(r"^\s*USER(?:\s+|$)", re.IGNORECASE)
 _RUN_RE = re.compile(r"^\s*RUN\s+(?P<rest>.*)$", re.IGNORECASE)
 _ARG_DEFAULT_RE = re.compile(
@@ -163,6 +164,16 @@ def _dockerfile_declares_user(content: str) -> bool:
     return any(_USER_RE.match(line) for line in content.splitlines())
 
 
+def _reject_unflattened_copy_from(content: str) -> None:
+    """Reject COPY instructions with ``--from`` left after flattening."""
+    if any(_COPY_FROM_REMAINDER_RE.match(line) for line in content.splitlines()):
+        raise ValueError(
+            "Dockerfile contains a COPY --from instruction that Novita cannot "
+            "flatten. Use a simple `COPY --from=<stage> <src> <dst>` form or "
+            "build the image with `openenv build` and pass the registry image."
+        )
+
+
 def _flatten_multistage(content: str) -> str:
     """Collapse a multi-stage Dockerfile into a single stage.
 
@@ -178,11 +189,13 @@ def _flatten_multistage(content: str) -> str:
     source path.
 
     Raises:
-        ValueError: If the stages do not share one base image, or a copy pulls
-            from a stage other than the builder.
+        ValueError: If the stages do not share one base image, a copy pulls from
+            a stage other than the builder, or a ``COPY --from`` cannot be
+            flattened.
     """
     stages = _split_stages(content)
     if len(stages) < 2:
+        _reject_unflattened_copy_from(content)
         return content
 
     bases = {stage["base"] for stage in stages}
@@ -229,7 +242,9 @@ def _flatten_multistage(content: str) -> str:
                 f"cp -a {shlex.quote(src)} {shlex.quote(dst)}"
             )
 
-    return "\n".join(out)
+    flattened = "\n".join(out)
+    _reject_unflattened_copy_from(flattened)
+    return flattened
 
 
 def _prepare_dockerfile(content: str) -> str:

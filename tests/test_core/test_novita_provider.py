@@ -824,6 +824,23 @@ class TestDockerfileRewriting:
                 "COPY --from=other /a /b\n"
             )
 
+    @pytest.mark.parametrize(
+        "copy_line",
+        [
+            "COPY --chown=app:app --from=builder /a /b",
+            "COPY --from=builder --chown=app:app /a /b",
+            "COPY --from=builder /a /b /c",
+        ],
+    )
+    def test_flatten_rejects_unflattened_copy_from(self, copy_line):
+        from openenv.core.containers.runtime.novita_provider import _flatten_multistage
+
+        with pytest.raises(ValueError, match="COPY --from"):
+            _flatten_multistage(
+                "FROM python:3.11 AS builder\nRUN echo hi\nFROM python:3.11\n"
+                f"{copy_line}\n"
+            )
+
     def test_single_stage_passthrough(self):
         from openenv.core.containers.runtime.novita_provider import _flatten_multistage
 
