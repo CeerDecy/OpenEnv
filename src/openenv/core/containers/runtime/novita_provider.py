@@ -56,6 +56,7 @@ _COPY_FROM_RE = re.compile(
     r"^\s*COPY\s+--from=(?P<stage>\S+)\s+(?P<src>\S+)\s+(?P<dst>\S+)\s*$",
     re.IGNORECASE,
 )
+_USER_RE = re.compile(r"^\s*USER(?:\s+|$)", re.IGNORECASE)
 _RUN_RE = re.compile(r"^\s*RUN\s+(?P<rest>.*)$", re.IGNORECASE)
 _ARG_DEFAULT_RE = re.compile(
     r"^\s*ARG\s+(?P<name>\w+)=(?P<value>\S+)\s*$", re.IGNORECASE
@@ -155,6 +156,11 @@ def _split_stages(content: str) -> List[Dict[str, Any]]:
         elif current is not None:
             current["body"].append(line)
     return stages
+
+
+def _dockerfile_declares_user(content: str) -> bool:
+    """Return whether *content* contains a Dockerfile ``USER`` instruction."""
+    return any(_USER_RE.match(line) for line in content.splitlines())
 
 
 def _flatten_multistage(content: str) -> str:
@@ -422,14 +428,11 @@ class _DefaultNovitaAdapter:
         # OpenEnv image that is wrong: `WORKDIR /app`, created by root, stays
         # root-owned, so the server and every command the environment later runs
         # in-process (`TB2_MODE=local`, and any env doing the same) fail with
-        # "Permission denied" on the install tree. Providers that do not rewrite
-        # USER -- Daytona, for one -- keep the image's default and never see
-        # this, which is why the same Dockerfile works there unchanged.
-        #
-        # Set explicitly rather than relying on the Dockerfile: a Dockerfile that
-        # DOES declare a USER would otherwise be honored, leaving this provider
-        # inconsistent about the identity its commands run as.
-        builder.set_user(_SANDBOX_USER)
+        # "Permission denied" on the install tree. Preserve an explicit Dockerfile
+        # USER, though, so the provider does not override the image author's
+        # requested runtime identity.
+        if not _dockerfile_declares_user(dockerfile_content):
+            builder.set_user(_SANDBOX_USER)
 
         # `set_start_cmd` is the only way to pin the start command and it
         # requires a readiness check, so the keepalive gets a short timer. The

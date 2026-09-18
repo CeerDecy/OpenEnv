@@ -1104,6 +1104,22 @@ class TestDefaultAdapter:
         finally:
             sys.modules.pop("novita_sandbox", None)
 
+    def test_build_template_preserves_explicit_dockerfile_user(self):
+        _, calls = _install_fake_novita()
+        try:
+            adapter = _DefaultNovitaAdapter(api_key="k", domain=None)
+            adapter.build_template(
+                dockerfile_content=("FROM python:3.12\nUSER app\nWORKDIR /app\n"),
+                context_dir="/ctx",
+                name="n",
+                cpu_count=2,
+                memory_mb=1024,
+                on_build_logs=None,
+            )
+            assert calls["build_builder"].user is None
+        finally:
+            sys.modules.pop("novita_sandbox", None)
+
     def test_exec_swallows_nonzero_exit(self):
         """Probes exit non-zero by design; stdout must still come back."""
         mod, _ = _install_fake_novita()
