@@ -384,8 +384,9 @@ class _DefaultNovitaAdapter:
             # OpenEnv image that CMD is the uvicorn server, so leaving it in
             # place would bind port 8000 before this provider launches its own
             # copy. Setting `start_cmd` here wins over the inherited value (the
-            # caller always overrides the image) while the image's ENV still
-            # comes through, which is what the PATH needs.
+            # caller always overrides the image). The SDK attempts to restore
+            # the image's ENV, but callers must use explicit paths when a
+            # registry config cannot be read during OCI template conversion.
             ready_cmd = wait_for_timeout(_KEEPALIVE_READY_MS)
             kwargs["image"] = image
             kwargs["build"] = {
@@ -406,7 +407,15 @@ class _DefaultNovitaAdapter:
 
         return self._novita.sandbox.create(**kwargs)
 
-    def exec(self, sandbox: Any, command: str, *, timeout: float = 10) -> str:
+    def exec(
+        self,
+        sandbox: Any,
+        command: str,
+        *,
+        timeout: float = 10,
+        background: bool = False,
+        user: Optional[str] = None,
+    ) -> str:
         """Run *command* through a login shell inside *sandbox*, returning stdout.
 
         The SDK runs commands as ``/bin/bash -l -c <command>`` and raises
@@ -417,12 +426,19 @@ class _DefaultNovitaAdapter:
         """
         from novita_sandbox import CommandExitException
 
+        run_kwargs: Dict[str, Any] = {
+            "timeout": timeout,
+            "background": background,
+        }
+        if user is not None:
+            run_kwargs["user"] = user
+
         try:
-            result = sandbox.commands.run(command, timeout=timeout)
+            result = sandbox.commands.run(command, **run_kwargs)
         except CommandExitException as exc:
             return exc.stdout or ""
         except ImportError:  # pragma: no cover - SDK always exports this
-            result = sandbox.commands.run(command, timeout=timeout)
+            result = sandbox.commands.run(command, **run_kwargs)
 
         return getattr(result, "stdout", "") or ""
 
@@ -770,6 +786,7 @@ class NovitaSandboxProvider(ContainerProvider):
 
         self._sandbox: Any = None
         self._base_url: Optional[str] = None
+        self._server_user: Optional[str] = None
         # Injected env-var values, used to scrub captured server output before
         # it is ever surfaced in an error.
         self._redact_values: set[str] = set()
@@ -867,9 +884,25 @@ class NovitaSandboxProvider(ContainerProvider):
                 Environment variables forwarded to the sandbox, overriding the
                 constructor's.
             **kwargs:
-                `cmd` (`str`) to override the server command. Unknown options
-                raise `ValueError` so typos cannot silently change sandbox
-                behavior.
+                `cmd` (`str`) to override the server command. For a registry
+                OCI image, pass the command explicitly together with any
+                runtime environment the image needs: Novita may not be able to
+                restore the image's ``ENV`` while converting it to a template.
+                For example, the tbench2 image requires:
+
+                ``cmd="cd /app/env && PYTHONPATH=/app/env "
+                "/app/.venv/bin/python -m uvicorn server.app:app "
+                "--host 0.0.0.0 --port 8000"``
+
+                and any additional values can be supplied through
+                ``env_vars``. The provider runs this command as ``root`` for a
+                registry image; a ``template:<id>`` keeps the template's
+                configured user. Prefer
+                ``NovitaSandboxProvider.image_from_dockerfile(...)`` when a
+                local Dockerfile is available; its build preserves the
+                environment and startup configuration in the generated
+                template. Unknown options raise `ValueError` so typos cannot
+                silently change sandbox behavior.
 
         Returns:
             `str`: HTTPS sandbox URL for the exposed port (base_url).
@@ -955,7 +988,15 @@ class NovitaSandboxProvider(ContainerProvider):
             if cmd is None:
                 cmd = self._discover_server_cmd()
 
-            self._launch_server(cmd)
+            # Registry images can lose their Dockerfile USER/ownership settings
+            # while Novita converts them to a cached OCI template. Run the
+            # provider-managed server command as root for that path. A template
+            # keeps its configured user, including an explicit non-root USER.
+            self._server_user = _SANDBOX_USER if sandbox_image is not None else None
+            self._launch_server(
+                cmd,
+                user=self._server_user,
+            )
             host = _require_bare_host(
                 self._adapter.host(self._sandbox, _DEFAULT_NOVITA_PORT)
             )
@@ -971,22 +1012,23 @@ class NovitaSandboxProvider(ContainerProvider):
 
         return self._base_url
 
-    def _launch_server(self, cmd: str) -> None:
+    def _launch_server(self, cmd: str, *, user: Optional[str] = None) -> None:
         """Start the OpenEnv server inside the sandbox as a background process.
 
         This is the one place the provider assumes something about the image, so
         it is kept to a single method.
 
-        The server is launched with ``nohup`` and its PID written to
-        ``/tmp/openenv-server.pid``, so ``wait_for_ready`` can tell "still
-        booting" apart from "crashed" instead of waiting out the full timeout.
+        The server is launched through the SDK's background command support and
+        its PID is written to ``/tmp/openenv-server.pid``, so ``wait_for_ready``
+        can tell "still booting" apart from "crashed" instead of waiting out
+        the full timeout.
         The sandbox was created with a ``sleep infinity`` start command rather
         than the image's own CMD (see ``_DefaultNovitaAdapter.create_sandbox``),
         which is what leaves port 8000 free for this process.
 
         An alternative is to let the platform own it: pass the server command as
         the template's start command via the SDK's ``build={"cmd": ...}`` and
-        drop this method's ``nohup``. That trades the PID-based crash detection
+        drop this method. That trades the PID-based crash detection
         below for platform-managed lifecycle and readiness. It is not the
         default because a start command can only be set when the image is first
         resolved into a template, so it would not apply to an already-cached
@@ -995,19 +1037,26 @@ class NovitaSandboxProvider(ContainerProvider):
         ``cmd`` is trusted orchestrator configuration, not agent or environment
         input — callers must not pass agent-controlled text, and any dynamic
         value interpolated into it must be quoted by the caller (S5). The
-        sandbox SDK runs commands as ``/bin/bash -l -c <command>``, which is
-        what makes the backgrounding, redirection, and PID capture work.
+        sandbox SDK runs commands as ``/bin/bash -l -c <command>``; the command
+        itself owns the PID file and log redirection while ``background=True``
+        keeps the remote process alive after this call.
         """
         if self._working_directory:
             command = f"cd {shlex.quote(self._working_directory)} && {cmd}"
         else:
             command = cmd
 
-        escaped = shlex.quote(command)
+        launch_command = (
+            "echo $$ > /tmp/openenv-server.pid; "
+            f"exec sh -c {shlex.quote(command)} "
+            "> /tmp/openenv-server.log 2>&1"
+        )
+        escaped = shlex.quote(launch_command)
         self._adapter.exec(
             self._sandbox,
-            f"nohup bash -c {escaped} > /tmp/openenv-server.log 2>&1 & "
-            "echo $! > /tmp/openenv-server.pid",
+            f"sh -c {escaped}",
+            background=True,
+            user=user,
         )
 
     def stop_container(self) -> None:
@@ -1027,6 +1076,7 @@ class NovitaSandboxProvider(ContainerProvider):
         finally:
             self._sandbox = None
             self._base_url = None
+            self._server_user = None
             self._redact_values = set()
 
     def close(self) -> None:
@@ -1084,7 +1134,11 @@ class NovitaSandboxProvider(ContainerProvider):
             return base
 
         log = self._redact(
-            self._adapter.exec(self._sandbox, "cat /tmp/openenv-server.log 2>/dev/null")
+            self._adapter.exec(
+                self._sandbox,
+                "cat /tmp/openenv-server.log 2>/dev/null",
+                user=self._server_user,
+            )
         )
         return (
             "Novita sandbox server process died during startup. The excerpt below "
@@ -1135,8 +1189,11 @@ class NovitaSandboxProvider(ContainerProvider):
             if self._sandbox is not None:
                 out = self._adapter.exec(
                     self._sandbox,
-                    "kill -0 $(cat /tmp/openenv-server.pid) 2>/dev/null"
-                    " && echo RUNNING || echo DEAD",
+                    "if test -s /tmp/openenv-server.pid; then "
+                    "kill -0 $(cat /tmp/openenv-server.pid) 2>/dev/null "
+                    "&& echo RUNNING || echo DEAD; "
+                    "else echo STARTING; fi",
+                    user=self._server_user,
                 )
                 if "DEAD" in (out or ""):
                     raise RuntimeError(self._server_died_message())

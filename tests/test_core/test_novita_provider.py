@@ -10,6 +10,7 @@ SDK shape (method names and kwargs), so SDK churn shows up as a test failure.
 
 from __future__ import annotations
 
+import shlex
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -32,12 +33,15 @@ class _FakeAdapter:
     def __init__(self):
         self.created: list[dict] = []
         self.exec_commands: list[str] = []
+        self.exec_background: list[bool] = []
+        self.exec_users: list[str | None] = []
         self.killed = 0
         self.host_value = _SANDBOX_HOST
         self.fail_create = False
         self.fail_kill = False
         self.fail_build = False
         self.dead_process = False
+        self.pid_ready = True
         self.log = "server crashed"
         self.has_yaml = True
         self.template_builds: list[dict] = []
@@ -93,8 +97,10 @@ class _FakeAdapter:
         )
         return self.template_id
 
-    def exec(self, sandbox, command, *, timeout=10):
+    def exec(self, sandbox, command, *, timeout=10, background=False, user=None):
         self.exec_commands.append(command)
+        self.exec_background.append(background)
+        self.exec_users.append(user)
         if "test -f /app/env/openenv.yaml" in command:
             return "found" if self.has_yaml else ""
         if command.startswith("cat /app/env/openenv.yaml"):
@@ -102,6 +108,8 @@ class _FakeAdapter:
         if "find /app" in command:
             return ""
         if "kill -0" in command:
+            if not self.pid_ready:
+                return "STARTING"
             return "DEAD" if self.dead_process else "RUNNING"
         if "cat /tmp/openenv-server.log" in command:
             return self.log
@@ -296,18 +304,31 @@ class TestServerCmd:
 
 
 # ---------------------------------------------------------------------------
-# Tests: launch (nohup + PID capture)
+# Tests: launch (SDK background command + PID capture)
 # ---------------------------------------------------------------------------
 class TestLaunch:
     def _launch_command(self, adapter):
-        return next(c for c in adapter.exec_commands if "nohup" in c)
+        return next(c for c in adapter.exec_commands if "echo $$" in c)
 
-    def test_nohup_with_pid_capture(self, provider, adapter):
+    def test_background_launch_with_pid_capture(self, provider, adapter):
         provider.start_container("img:latest")
         launch = self._launch_command(adapter)
-        assert "nohup bash -c" in launch
+        assert "echo $$ > /tmp/openenv-server.pid" in launch
         assert "/tmp/openenv-server.log" in launch
-        assert "echo $! > /tmp/openenv-server.pid" in launch
+        assert adapter.exec_background[-1] is True
+        assert adapter.exec_users[-1] == "root"
+
+    def test_liveness_probe_uses_server_user(self, provider, adapter):
+        adapter.dead_process = True
+        provider.start_container("img:latest")
+        url = provider.base_url
+
+        import requests
+
+        with patch("requests.get", side_effect=requests.ConnectionError("refused")):
+            with pytest.raises(RuntimeError, match="server process died"):
+                provider.wait_for_ready(url)
+        assert adapter.exec_users[-1] == "root"
 
     def test_cmd_is_shlex_quoted(self, adapter):
         provider = NovitaSandboxProvider(
@@ -316,7 +337,12 @@ class TestLaunch:
         provider.start_container("img:latest")
         launch = self._launch_command(adapter)
         # Quoted, so the semicolon cannot split into a second command.
-        assert "'sh -c" in launch
+        parsed = shlex.split(launch)
+        assert parsed[:2] == ["sh", "-c"]
+        nested = shlex.split(parsed[2])
+        assert nested[:2] == ["echo", "$$"]
+        assert "exec" in nested and "sh" in nested
+        assert "sh -c 'echo hi; sleep 1'" in nested
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +490,17 @@ class TestWaitForReady:
             with pytest.raises(RuntimeError, match="server process died") as exc:
                 provider.wait_for_ready(url)
         assert "server crashed" not in str(exc.value)
+
+    def test_missing_pid_file_is_still_starting(self, provider, adapter):
+        """The SDK background launch may write the PID after the first probe."""
+        adapter.pid_ready = False
+        url = provider.start_container("img:latest")
+
+        import requests
+
+        responses = [requests.ConnectionError("refused"), MagicMock(status_code=200)]
+        with patch("requests.get", side_effect=responses):
+            provider.wait_for_ready(url)
 
     def test_dead_process_log_surfaced_when_opted_in(self, adapter):
         adapter.dead_process = True
@@ -1206,6 +1243,19 @@ class TestDefaultAdapter:
                 return_value=types.SimpleNamespace(stdout="found\n")
             )
             assert adapter.exec(sandbox, "echo found") == "found\n"
+        finally:
+            sys.modules.pop("novita_sandbox", None)
+
+    def test_exec_forwards_background(self):
+        _, _calls = _install_fake_novita()
+        try:
+            adapter = _DefaultNovitaAdapter(api_key="k", domain=None)
+            sandbox = MagicMock()
+            sandbox.commands.run = MagicMock(return_value=object())
+            adapter.exec(sandbox, "python -m server", background=True, user="root")
+            sandbox.commands.run.assert_called_once_with(
+                "python -m server", timeout=10, background=True, user="root"
+            )
         finally:
             sys.modules.pop("novita_sandbox", None)
 

@@ -325,7 +325,7 @@ async def main() -> int:
         await asyncio.to_thread(
             provider.wait_for_ready, base_url, args.sandbox_timeout_s
         )
-        print(f"Server ready at {base_url}\n")
+        print("Novita sandbox server is ready.\n")
 
         # The client is given the provider, so exiting this block tears the
         # sandbox down — one task, one sandbox. The outer finally covers the
