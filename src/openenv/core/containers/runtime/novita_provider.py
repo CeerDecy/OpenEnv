@@ -1055,6 +1055,7 @@ class NovitaSandboxProvider(ContainerProvider):
         self._adapter.exec(
             self._sandbox,
             f"sh -c {escaped}",
+            timeout=0,
             background=True,
             user=user,
         )

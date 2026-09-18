@@ -33,6 +33,7 @@ class _FakeAdapter:
     def __init__(self):
         self.created: list[dict] = []
         self.exec_commands: list[str] = []
+        self.exec_timeouts: list[float] = []
         self.exec_background: list[bool] = []
         self.exec_users: list[str | None] = []
         self.killed = 0
@@ -99,6 +100,7 @@ class _FakeAdapter:
 
     def exec(self, sandbox, command, *, timeout=10, background=False, user=None):
         self.exec_commands.append(command)
+        self.exec_timeouts.append(timeout)
         self.exec_background.append(background)
         self.exec_users.append(user)
         if "test -f /app/env/openenv.yaml" in command:
@@ -315,6 +317,7 @@ class TestLaunch:
         launch = self._launch_command(adapter)
         assert "echo $$ > /tmp/openenv-server.pid" in launch
         assert "/tmp/openenv-server.log" in launch
+        assert adapter.exec_timeouts[-1] == 0
         assert adapter.exec_background[-1] is True
         assert adapter.exec_users[-1] == "root"
 
