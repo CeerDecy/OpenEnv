@@ -65,13 +65,15 @@ _ARG_DEFAULT_RE = re.compile(
 
 
 def _strip_mount_flags(content: str) -> str:
-    """Remove BuildKit ``--mount=...`` flags from ``RUN`` instructions.
+    """Remove supported BuildKit cache mounts from ``RUN`` instructions.
 
     Novita's template parser copies a ``RUN`` body verbatim into the build
     command, so a leading ``--mount=type=cache,...`` would be handed to the
     shell as an argument rather than honored as BuildKit syntax. Every in-repo
-    OpenEnv Dockerfile uses one to cache ``uv`` downloads, so the flags are
-    stripped rather than left to fail the build.
+    OpenEnv Dockerfile uses one to cache ``uv`` downloads, so explicit cache
+    mounts are stripped rather than left to fail the build. Other mount types
+    affect build semantics and cannot be represented by Novita's parser, so
+    they are rejected instead of silently removed.
     """
     lines = content.split("\n")
     out: List[str] = []
@@ -89,9 +91,23 @@ def _strip_mount_flags(content: str) -> str:
                 prefix = line[: run_match.start("rest")]
                 stripped = run_match.group("rest")
             while True:
-                mount = re.match(r"\s*--mount=\S+\s*", stripped)
+                mount = re.match(r"\s*--mount=(?P<spec>\S+)(?P<space>\s*)", stripped)
                 if not mount:
                     break
+                spec = mount.group("spec")
+                options = spec.split(",")
+                types = [
+                    option.split("=", 1)[1].lower()
+                    for option in options
+                    if option.lower().startswith("type=")
+                ]
+                if types != ["cache"]:
+                    raise ValueError(
+                        "Novita Dockerfile rewriting only supports explicit "
+                        "RUN --mount=type=cache options; unsupported mount "
+                        "types must be handled by `openenv build` and a "
+                        "registry image."
+                    )
                 stripped = stripped[mount.end() :]
             line = prefix + stripped
             if not line.rstrip().endswith("\\"):

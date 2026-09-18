@@ -779,6 +779,32 @@ class TestDockerfileRewriting:
         assert "--mount=" not in out
         assert "uv sync --frozen" in out
 
+    @pytest.mark.parametrize(
+        "mount",
+        [
+            "type=secret,id=token",
+            "type=ssh",
+            "type=bind,source=.,target=/src",
+            "target=/src",
+        ],
+    )
+    def test_strip_mount_flags_rejects_unsupported_types(self, mount):
+        from openenv.core.containers.runtime.novita_provider import _strip_mount_flags
+
+        with pytest.raises(ValueError, match="only supports explicit"):
+            _strip_mount_flags(f"RUN --mount={mount} echo hi\n")
+
+    def test_strip_mount_flags_rejects_unsupported_mount_on_later_line(self):
+        from openenv.core.containers.runtime.novita_provider import _strip_mount_flags
+
+        content = (
+            "RUN --mount=type=cache,target=/root/.cache/uv \\\n"
+            "    --mount=type=secret,id=token \\\n"
+            "    uv sync\n"
+        )
+        with pytest.raises(ValueError, match="only supports explicit"):
+            _strip_mount_flags(content)
+
     def test_strip_mount_flags_preserves_non_run_lines(self):
         from openenv.core.containers.runtime.novita_provider import _strip_mount_flags
 
