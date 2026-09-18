@@ -414,6 +414,15 @@ class TestSecureUrl:
         with pytest.raises(RuntimeError, match="loopback host"):
             provider.start_container("img:latest")
 
+    @pytest.mark.parametrize(
+        "host", ["https://example.test:8000", "http://example.test:8000"]
+    )
+    def test_scheme_bearing_host_rejected(self, adapter, host):
+        adapter.host_value = host
+        provider = NovitaSandboxProvider(_adapter=adapter)
+        with pytest.raises(RuntimeError, match="invalid host"):
+            provider.start_container("img:latest")
+
     def test_loopback_failure_cleans_up(self, adapter):
         adapter.host_value = "127.0.0.1:8000"
         provider = NovitaSandboxProvider(_adapter=adapter)
@@ -820,6 +829,19 @@ class TestDockerfileRewriting:
 
         content = "FROM python:3.11\nRUN echo hi\n"
         assert _flatten_multistage(content) == content
+
+    def test_flatten_quotes_copy_paths_for_shell(self):
+        from openenv.core.containers.runtime.novita_provider import _flatten_multistage
+
+        out = _flatten_multistage(
+            "FROM python:3.11 AS builder\nRUN echo hi\nFROM python:3.11\n"
+            "COPY --from=builder /app/source;id /out/$(id)\n"
+        )
+
+        assert (
+            "RUN mkdir -p $(dirname '/out/$(id)') && "
+            "cp -a '/app/source;id' '/out/$(id)'"
+        ) in out
 
 
 # ---------------------------------------------------------------------------

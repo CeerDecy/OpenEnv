@@ -218,7 +218,10 @@ def _flatten_multistage(content: str) -> str:
             dst = copy_match.group("dst")
             if src == dst:
                 continue
-            out.append(f"RUN mkdir -p $(dirname {dst}) && cp -a {src} {dst}")
+            out.append(
+                f"RUN mkdir -p $(dirname {shlex.quote(dst)}) && "
+                f"cp -a {shlex.quote(src)} {shlex.quote(dst)}"
+            )
 
     return "\n".join(out)
 
@@ -243,7 +246,11 @@ def _require_secure_url(url: str) -> str:
     through the account that owns it, so the address is treated as
     account-scoped rather than pasted into logs.
     """
-    if not isinstance(url, str) or not url.lower().startswith("https://"):
+    if (
+        not isinstance(url, str)
+        or not url.lower().startswith("https://")
+        or "://" in url[len("https://") :]
+    ):
         raise RuntimeError(
             "Novita sandbox returned a non-HTTPS host URL. OpenEnv requires an "
             "https/wss base_url so EnvClient traffic is encrypted. Refusing to "
@@ -264,6 +271,16 @@ def _require_secure_url(url: str) -> str:
         )
 
     return url
+
+
+def _require_bare_host(host: str) -> str:
+    """Require the SDK host value to contain no URL scheme."""
+    if not isinstance(host, str) or not host or "://" in host:
+        raise RuntimeError(
+            "Novita sandbox returned an invalid host. Expected a bare hostname "
+            "without a URL scheme."
+        )
+    return host
 
 
 def _raise_install_error(exc: ImportError) -> None:
@@ -896,9 +913,10 @@ class NovitaSandboxProvider(ContainerProvider):
                 cmd = self._discover_server_cmd()
 
             self._launch_server(cmd)
-            self._base_url = _require_secure_url(
-                f"https://{self._adapter.host(self._sandbox, _DEFAULT_NOVITA_PORT)}"
+            host = _require_bare_host(
+                self._adapter.host(self._sandbox, _DEFAULT_NOVITA_PORT)
             )
+            self._base_url = _require_secure_url(f"https://{host}")
         except Exception:
             # A cleanup failure here must not mask the original error: swallow
             # any exception from stop_container() so the root cause propagates.
